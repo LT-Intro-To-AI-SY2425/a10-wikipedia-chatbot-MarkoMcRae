@@ -1,25 +1,58 @@
-import re, string, calendar
-from wikipedia import WikipediaPage
+import re, string
+import requests
 import wikipedia
-from bs4 import BeautifulSoup
-from nltk import word_tokenize, pos_tag, ne_chunk
-from nltk.tree import Tree
-from match import match
-from typing import List, Callable, Tuple, Any, Match
+from typing import List, Callable, Tuple, Any, Match as TypingMatch  # Removed duplicate import
+# Removed unused imports from nltk
+# Removed unused import from nltk.tree
+# Removed unused import from nltk.tree
+from typing import Optional
+
+def match(pattern: List[str], source: List[str]) -> Optional[List[str]]:
+    """Matches a pattern with a source list of words.
+
+    Args:
+        pattern - a list of words with '%' as a wildcard
+        source - a list of words to match against the pattern
+
+    Returns:
+        A list of matched words if the pattern matches, otherwise None
+    """
+    if len(pattern) != len(source):
+        return None
+
+    matches = []
+    for p, s in zip(pattern, source):
+        if p == "%":
+            matches.append(s)
+        elif p != s:
+            return None
+
+    return matches
+from typing import List, Callable, Tuple, Any, Match as TypingMatch
 
 
 def get_page_html(title: str) -> str:
-    """Gets html of a wikipedia page
-
-    Args:
-        title - title of the page
-
-    Returns:
-        html of the page
-    """
     results = wikipedia.search(title)
-    return WikipediaPage(results[0]).html()
-
+    if not results:
+        raise LookupError(f"No results found for title: {title}")
+    
+    print("Search results:", results)  # <-- TEMPORARY DEBUGGING LINE
+    
+    try:
+        page = wikipedia.page(results[0])
+        page_url = page.url
+    except wikipedia.exceptions.DisambiguationError as e:
+        raise LookupError(f"Disambiguation error: {e}")
+    except wikipedia.exceptions.PageError as e:
+        raise LookupError(f"Page error: {e}")
+    except IndexError:
+        raise LookupError("No valid page found for the given title")
+    response = requests.get(page_url)  # Enable SSL verification for security
+    
+    if response.status_code != 200:
+        raise LookupError(f"Failed to fetch page HTML: {response.status_code}")
+    
+    return response.text
 
 def get_first_infobox_text(html: str) -> str:
     """Gets first infobox html from a Wikipedia page (summary box)
@@ -30,6 +63,7 @@ def get_first_infobox_text(html: str) -> str:
     Returns:
         html of just the first infobox
     """
+    from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "html.parser")
     results = soup.find_all(class_="infobox")
 
@@ -57,7 +91,7 @@ def get_match(
     text: str,
     pattern: str,
     error_text: str = "Page doesn't appear to have the property you're expecting",
-) -> Match:
+) -> TypingMatch:
     """Finds regex matches for a pattern
 
     Args:
@@ -85,12 +119,14 @@ def get_polar_radius(planet_name: str) -> str:
     Returns:
         radius of the given planet
     """
-    infobox_text = clean_text(get_first_infobox_text(get_page_html(planet_name)))
-    pattern = r"(?:Polar radius.*?)(?: ?[\d]+ )?(?P<radius>[\d,.]+)(?:.*?)km"
-    error_text = "Page infobox has no polar radius information"
-    match = get_match(infobox_text, pattern, error_text)
-
-    return match.group("radius")
+    try:
+        infobox_text = clean_text(get_first_infobox_text(get_page_html(planet_name)))
+        pattern = r"(?:Polar radius.*?)(?: ?[\d]+ )?(?P<radius>[\d,.]+)(?:.*?)km"
+        error_text = "Page infobox has no polar radius information"
+        match = get_match(infobox_text, pattern, error_text)
+        return match.group("radius")
+    except LookupError as e:
+        return f"Error: {e}"
 
 
 def get_birth_date(name: str) -> str:
@@ -112,20 +148,53 @@ def get_birth_date(name: str) -> str:
     return match.group("birth")
 
 
+def get_population_size(country: str) -> str:
+    infobox_text = clean_text(get_first_infobox_text(get_page_html(country)))
+    pattern = r"(?:Population.*?)(?P<pop>\d{1,3}(?:,\d{3})+)"
+    error_text = (
+        "Page infobox has no information for population size"
+    )
+    match = get_match(infobox_text, pattern, error_text)
+
+    return match.group("pop")
+
+
+def get_capital(capital_name: str) -> str:
+    infobox_text = clean_text(get_first_infobox_text(get_page_html(capital_name)))
+    pattern = r"(?:capital[^\w]*[:|]?[^\w]*)(?P<capital>[A-Za-z\s]+)"
+    error_text = (
+        "Page infobox has no information for the capital"
+    )
+    
+    match = get_match(infobox_text, pattern, error_text)
+    
+    capital = match.group("capital") 
+
+    if "and largest city" in capital:
+        capital = capital.replace("and largest city", "").strip()
+
+    return capital
+
+
+def get_coordinates(place: str) -> str:
+    infobox_text = clean_text(get_first_infobox_text(get_page_html(place)))
+    pattern = r"Coordinates(?P<coord>[\dNEWS\.\/\s\-;]+)"
+    error_text = (
+        "No coordinate information found in correct format"
+    )
+    match = get_match(infobox_text, pattern, error_text)
+
+    return match.group("coord")
+
+
+
 # below are a set of actions. Each takes a list argument and returns a list of answers
 # according to the action and the argument. It is important that each function returns a
 # list of the answer(s) and not just the answer itself.
 
 
 def birth_date(matches: List[str]) -> List[str]:
-    """Returns birth date of named person in matches
-
-    Args:
-        matches - match from pattern of person's name to find birth date of
-
-    Returns:
-        birth date of named person
-    """
+    print(f"[DEBUG] birth_date matches: {matches}")
     return [get_birth_date(" ".join(matches))]
 
 
@@ -141,9 +210,19 @@ def polar_radius(matches: List[str]) -> List[str]:
     return [get_polar_radius(matches[0])]
 
 
-# dummy argument is ignored and doesn't matter
-def bye_action(dummy: List[str]) -> None:
+def population_size(matches: List[str]) -> List[str]:
+    return [get_population_size(matches[0])]
+
+def capital(matches: List[str]) -> List[str]:
+    return [get_capital(matches[0])]
+
+def coordinates(matches: List[str]) -> List[str]:
+    return [get_coordinates(matches[0])]
+
+def bye_action(_: List[str]) -> None:
+    """Exits the program gracefully."""
     raise KeyboardInterrupt
+# Removed redundant definition of bye_action
 
 
 # type aliases to make pa_list type more readable, could also have written:
@@ -152,10 +231,13 @@ Pattern = List[str]
 Action = Callable[[List[str]], List[Any]]
 
 # The pattern-action list for the natural language query system. It must be declared
-# here, after all of the function definitions
+# here, after all of the funcztion definitions
 pa_list: List[Tuple[Pattern, Action]] = [
     ("when was % born".split(), birth_date),
     ("what is the polar radius of %".split(), polar_radius),
+    ("what is the population of %".split(), population_size),
+    ("what is the capital of %".split(), capital),
+    ("what are the coordinates of % ".split(), coordinates),
     (["bye"], bye_action),
 ]
 
@@ -184,12 +266,13 @@ def search_pa_list(src: List[str]) -> List[str]:
 def query_loop() -> None:
     """The simple query loop. The try/except structure is to catch Ctrl-C or Ctrl-D
     characters and exit gracefully"""
-    print("Welcome to the movie database!\n")
+    print("Welcome to the wikipedia database!\n")
     while True:
         try:
             print()
-            query = input("Your query? ").replace("?", "").lower().split()
-            answers = search_pa_list(query)
+            query = input("Your query? ").replace("?", "").strip()
+            query_words = query.lower().split()
+            answers = search_pa_list(query_words)
             for ans in answers:
                 print(ans)
 
